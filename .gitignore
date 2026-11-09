@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+data/raw/
+artifacts/*.parquet
+artifacts/*.db
+mlflow.db
+mlruns/
+mlartifacts/
+.pytest_cache/
+artifacts/model.*

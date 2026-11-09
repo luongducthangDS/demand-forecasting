@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Demand Forecasting</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  :root { --bg:#f7f7f5; --card:#fff; --ink:#1d1d1b; --muted:#6b6b66; --line:#e3e3de;
+          --actual:#1d1d1b; --fc:#2a6fdb; --ma:#b0b0aa; --future:#e07a1f; --bad:#c0392b; --ok:#2e7d4f; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.45 system-ui, sans-serif; background:var(--bg); color:var(--ink); }
+  main { max-width:1100px; margin:0 auto; padding:20px 16px; }
+  h1 { font-size:20px; margin:0 0 4px; } .muted { color:var(--muted); }
+  .row { display:flex; gap:12px; flex-wrap:wrap; align-items:end; margin:14px 0; }
+  label { display:flex; flex-direction:column; gap:4px; font-size:12px; color:var(--muted); }
+  select, input, button { font:inherit; padding:6px 8px; border:1px solid var(--line); border-radius:6px; background:#fff; }
+  button { background:var(--ink); color:#fff; border-color:var(--ink); cursor:pointer; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px; margin-bottom:14px; }
+  .tiles { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px; }
+  .tile b { display:block; font-size:20px; } .tile span { font-size:12px; color:var(--muted); }
+  canvas { width:100% !important; max-height:340px; }
+  table { border-collapse:collapse; width:100%; } td, th { padding:4px 8px; border-bottom:1px solid var(--line); text-align:left; }
+  .bad { color:var(--bad); font-weight:600; } .ok { color:var(--ok); font-weight:600; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Demand Forecasting</h1>
+  <div class="muted" id="meta">loading…</div>
+
+  <div class="row">
+    <label>Cửa hàng<select id="store"></select></label>
+    <label>Nhóm hàng<select id="family"></select></label>
+  </div>
+
+  <div class="card tiles" id="tiles"></div>
+  <div class="card"><canvas id="chart"></canvas>
+    <div class="muted" style="font-size:12px">Đen: thực tế · Xanh: dự báo backtest · Xám: MA28 · Cam: dự báo 14 ngày tới</div></div>
+
+  <div class="card">
+    <b>Đề xuất nhập hàng</b>
+    <div class="row">
+      <label>Tồn kho hiện có<input id="onhand" type="number" min="0" value="50"></label>
+      <label>Đang về<input id="onorder" type="number" min="0" value="0"></label>
+      <label>Lead time (ngày)<input id="lt" type="number" min="1" max="14" value="2"></label>
+      <label>Chu kỳ đặt (ngày)<input id="rv" type="number" min="0" max="13" value="7"></label>
+      <label>Service level<input id="sl" type="number" step="0.01" min="0.5" max="0.99" value="0.95"></label>
+      <button id="go">Tính</button>
+    </div>
+    <div id="rep" class="muted">Dataset không có tồn kho; nhập số tồn từ ERP/WMS.</div>
+  </div>
+
+  <div class="card"><b>Monitoring</b> <span class="muted" id="mon"></span></div>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const j = (u, o) => fetch(u, o).then(r => r.ok ? r.json() : r.text().then(t => Promise.reject(t)));
+let chart;
+
+async function init() {
+  const [h, s] = await Promise.all([j('/health'), j('/series')]);
+  $('meta').textContent = `Model ${h.model} · version ${h.model_version} · cửa sổ dự báo ${h.forecast_window.join(' → ')}`;
+  $('store').innerHTML = s.stores.map(x => `<option>${x}</option>`).join('');
+  $('family').innerHTML = s.families.map(x => `<option ${x === 'GROCERY I' ? 'selected' : ''}>${x}</option>`).join('');
+  $('store').onchange = $('family').onchange = load;
+  $('go').onclick = replenish;
+  await load(); monitor(); setInterval(monitor, 10000);
+}
+
+async function load() {
+  const d = await j(`/series/${$('store').value}/${encodeURIComponent($('family').value)}`);
+  const m = d.backtest_metrics;
+  const next7 = d.forecast.slice(0, 7).reduce((a, r) => a + r.sales, 0);
+  $('tiles').innerHTML = [
+    ['WAPE backtest', m ? (m.WAPE * 100).toFixed(1) + '%' : '—'],
+    ['MAE backtest', m ? m.MAE.toFixed(1) : '—'],
+    ['Bias backtest', m ? (m.bias * 100).toFixed(1) + '%' : '—'],
+    ['Dự báo 7 ngày tới', next7.toFixed(0)],
+  ].map(([k, v]) => `<div class="tile"><span>${k}</span><b>${v}</b></div>`).join('');
+
+  const labels = [...new Set([...d.history, ...d.forecast].map(r => r.date))].sort();
+  const at = (rows, key) => { const m = new Map(rows.map(r => [r.date, r[key]])); return labels.map(l => m.has(l) ? m.get(l) : null); };
+  const ds = [
+    { label: 'Thực tế', data: at(d.history, 'sales'), borderColor: '#1d1d1b', borderWidth: 1.5 },
+    { label: 'Backtest', data: at(d.backtest, 'forecast'), borderColor: '#2a6fdb', borderWidth: 2 },
+    { label: 'MA28', data: at(d.backtest, 'ma28'), borderColor: '#b0b0aa', borderDash: [4, 3], borderWidth: 1.5 },
+    { label: 'Dự báo', data: at(d.forecast, 'sales'), borderColor: '#e07a1f', borderWidth: 2.5 },
+  ].map(x => ({ ...x, pointRadius: 0, spanGaps: false, tension: .2 }));
+  if (chart) chart.destroy();
+  chart = new Chart($('chart'), { type: 'line', data: { labels, datasets: ds },
+    options: { animation: false, interaction: { mode: 'index', intersect: false }, plugins: { legend: { display: false } },
+      scales: { x: { ticks: { maxTicksLimit: 10 } }, y: { beginAtZero: true } } } });
+}
+
+async function replenish() {
+  const body = { store_nbr: +$('store').value, service_level: +$('sl').value, items: [{
+    family: $('family').value, on_hand: +$('onhand').value, on_order: +$('onorder').value,
+    lead_time_days: +$('lt').value, review_days: +$('rv').value }] };
+  try {
+    const r = (await j('/replenishment', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })).items[0];
+    $('rep').innerHTML = `<table>
+      <tr><th>Nhu cầu dự báo (lead time + chu kỳ)</th><td>${r.demand_protection_window}</td></tr>
+      <tr><th>Tồn kho an toàn</th><td>${r.safety_stock}</td></tr>
+      <tr><th>Mức tồn mục tiêu</th><td>${r.order_up_to}</td></tr>
+      <tr><th>Số lượng nên đặt</th><td><b>${r.order_qty}</b></td></tr>
+      <tr><th>Xác suất hết hàng trước khi hàng về</th><td class="${r.at_risk ? 'bad' : 'ok'}">${(r.stockout_risk_before_delivery * 100).toFixed(1)}% ${r.at_risk ? '· nguy cơ thiếu hàng' : ''}</td></tr>
+      <tr><th>Số ngày tồn kho đủ bán</th><td>${r.days_of_cover}</td></tr></table>`;
+  } catch (e) { $('rep').textContent = e; }
+}
+
+async function monitor() {
+  const m = await j('/monitoring');
+  $('mon').textContent = `requests ${m.requests} · errors ${m.errors} · p50 ${m.latency_ms.p50} ms · p95 ${m.latency_ms.p95} ms · backtest WAPE ${(m.backtest_wape * 100).toFixed(1)}%` +
+    (m.live ? ` · live WAPE ${(m.live.WAPE * 100).toFixed(1)}% (n=${m.live.n})${m.live.drift_alert ? ' · DRIFT' : ''}` : ' · chưa có actuals');
+}
+init().catch(e => $('meta').textContent = 'Lỗi: ' + e);
+</script>
+</body>
+</html>

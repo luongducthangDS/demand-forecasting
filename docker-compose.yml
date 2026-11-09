@@ -1,0 +1,24 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: forecast
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-forecast-local}
+      POSTGRES_DB: forecast
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U forecast"]
+      interval: 3s
+      retries: 20
+
+  api:
+    build: .
+    depends_on:
+      db: {condition: service_healthy}
+    environment:
+      DATABASE_URL: postgresql+psycopg2://forecast:${POSTGRES_PASSWORD:-forecast-local}@db:5432/forecast
+    volumes: ["./artifacts:/app/artifacts:ro"]
+    ports: ["8000:8000"]
+
+volumes:
+  pgdata:

@@ -1,0 +1,6 @@
+.venv
+data
+artifacts
+mlruns
+mlflow.db
+tests
